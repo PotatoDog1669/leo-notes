@@ -10,8 +10,10 @@ const outfit = Outfit({
   variable: '--font-outfit',
 })
 
+const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ?? 'https://potatodog.cc'
+
 export const metadata: Metadata = {
-  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? 'http://localhost:3000'),
+  metadataBase: new URL(siteUrl),
   title: {
     default: "Leo's Notes",
     template: "%s | Leo's Notes",
