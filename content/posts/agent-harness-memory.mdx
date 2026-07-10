@@ -1,0 +1,236 @@
+---
+title: "Agent Harness 的记忆，不是一个数据库"
+date: 2026-07-10
+summary: "从 Claude Code、Codex、DeerFlow、Hermes、nanobot、OpenClaw 和 opencode 的实现出发，比较七种 Agent Memory 的生命周期、权威边界与检索取舍。"
+tags:
+  - Agent
+  - LLM
+  - System Design
+  - Memory
+---
+
+如果只看产品介绍，Agent 的“记忆”很容易被理解成一句话：把过去的对话存下来，以后再找回来。
+
+但顺着 Claude Code、Codex、DeerFlow、Hermes、nanobot、OpenClaw 和 opencode 的实现往下看，会发现它们讨论的其实不是同一个问题。有的系统在构建跨会话知识库，有的在维护小而稳定的用户画像，有的专注长会话压缩，还有的把检索能力交给插件。即便都使用 Markdown 或 SQLite，它们的数据流、权威边界和一致性语义也可能完全不同。
+
+真正的记忆系统不是一个存储组件，而是一条生命周期：
+
+```text
+交互产生信息
+    ↓
+判断什么值得保存（Acquisition）
+    ↓
+按用户、项目、团队或 agent 作用域持久化
+    ↓
+去重、纠正、遗忘和处理冲突（Maintenance）
+    ↓
+在未来任务中注入或检索（Delivery）
+    ↓
+模型据此回答、调用工具或修改环境（Utilization）
+```
+
+沿着这条链路看，七种 harness 的取舍会清楚很多。
+
+> 本文基于仓库中的源码研究文档归纳。许多能力受版本、实验开关和运行模式影响，文中描述的是当前研究快照中的设计，不应视为长期不变的产品承诺。
+
+## 先划清边界：历史、指令和记忆不是一回事
+
+“系统记得上文”至少可能来自四种机制：
+
+1. **会话历史**：当前 thread 的消息仍在上下文里，或通过 resume 恢复。它解决连续性，但没有跨越原会话边界。
+2. **Compaction**：把过长的当前会话压成摘要。它解决上下文窗口问题，但不会天然生成可供其他新会话使用的长期知识。
+3. **显式指令**：`AGENTS.md`、`CLAUDE.md`、`SOUL.md` 等由人维护的规则。它们跨会话生效，但权威性通常高于自动归纳的记忆。
+4. **长期记忆**：从过去交互中持久化信息，并在未来独立会话里重新交付给模型。
+
+这个区分对 opencode 尤其重要。opencode core 有扎实的 session history、compaction、System Context 和 instruction files，但没有默认的跨会话自动抽取、`memory_search` 或长期记忆维护流水线。把它称为“没有上下文能力”显然不对；把 compaction 直接算成完整长期记忆，也同样不准确。
+
+## 一张表看懂七种路线
+
+| Harness | 主要事实源 | 写入与整理 | 未来会话如何获得 | 最鲜明的设计取舍 |
+| --- | --- | --- | --- | --- |
+| Claude Code | `CLAUDE.md`、auto-memory topic、session/team/agent memory | 主 agent 直接写，turn-end extractor 补漏，auto-dream 整理 | 短索引 + 按需读，或 selector 每轮选择 topic | 作用域和权威性分层最细 |
+| Codex | rollout/thread、SQLite 阶段数据、`~/.codex/memories/*.md` | Phase 1 单会话提炼，Phase 2 全局合并 | 注入 `memory_summary.md`，再搜索、读取正文和证据 | 后台知识编译流水线最完整 |
+| DeerFlow | per-user/per-agent `memory.json` | turn 后去抖批处理，LLM 增量更新结构化档案 | 新会话首轮一次性注入并冻结 | 为 prompt cache 牺牲会话内新鲜度；纠正优先 |
+| Hermes | `MEMORY.md`、`USER.md`、session DB、可选 provider | memory tool、后台 review、审批门、provider 同步 | 小型内置记忆常驻；历史搜索或 provider 每轮 recall | 小而强的 profile + 可插拔外部记忆 |
+| nanobot | `SOUL.md`、`USER.md`、`MEMORY.md`、`history.jsonl` | Consolidator 写流水账，Dream 写 durable 文件并提交 Git | durable 文件 + 未巩固近期历史整体注入 | 无专用检索，以 cursor 和 Git 保证可审计巩固 |
+| OpenClaw | `MEMORY.md`、daily notes、SQLite/QMD 派生索引 | 显式写、压缩前 flush、dream/promote、增量索引 | bootstrap/startup 注入 + `memory_search`/`memory_get` | 文件为本体，检索后端最丰富 |
+| opencode | session DB、compaction checkpoint、instruction files | core 维护会话与系统上下文；长期记忆依赖文件约定或插件 | session replay/compaction/system context | 明确偏向会话连续性，而非内建长期记忆 |
+
+这张表也揭示了一个容易被忽略的事实：SQLite 并不自动意味着“数据库型记忆”，Markdown 也不意味着“朴素实现”。Codex 用 SQLite 协调异步任务，用 Markdown 给模型阅读，用 Git diff 判断增量；OpenClaw 的 SQLite/QMD 是从 Markdown 派生的搜索索引；opencode 虽然把 session 存在 SQLite 中，却没有因此获得跨会话语义记忆。
+
+## 七种系统分别在优化什么
+
+### Claude Code：先问“谁确认、影响谁、保存多久”
+
+Claude Code 是七种方案中分层最细的一套。它没有把所有长期信息塞进同一个 `MEMORY.md`，而是把不同权威性、作用域和生命周期拆开：
+
+- `CLAUDE.md` 家族保存人明确维护的指令；
+- auto-memory 保存项目范围内自动积累的 topic；
+- session memory 记录当前长会话的滚动状态，服务 compaction；
+- agent memory 隔离特定 subagent 的经验；
+- team memory 在项目成员之间同步共享知识。
+
+auto-memory 的读取也体现了渐进披露。传统模式只常驻一个短 `MEMORY.md` 索引，模型发现相关条目后再读 topic；selector 模式则扫描 topic 的 frontmatter，让一次 side query 为当前问题挑选少量相关文件。两者都是“先路由、再读正文”，只是路由者不同。
+
+写路径采用快慢双通道：用户明确说“记住”时，主 agent 可以立即写；若主 agent 漏记，turn 结束后的 extractor 会补做提炼；更低频的 auto-dream 再负责合并、去重和清理漂移。它的优势是覆盖完整，代价则是实现复杂、能力受多个 gate 控制，而且模型参与的 selector 与整理都不是确定性过程。
+
+Claude Code 给出的最重要启发不是某个文件名，而是三个问题：**这条信息是谁确认的、应该影响谁、需要保存多久？** 没回答这三个问题，记忆越多，作用域泄漏和旧事实污染反而越严重。
+
+### Codex：把历史会话“编译”为知识
+
+Codex 的长期记忆最像一条后台编译流水线：
+
+```text
+rollout / thread
+    ↓ Phase 1：逐会话提炼
+SQLite stage-1 outputs
+    ↓ Phase 2：跨会话去重、归类、遗忘
+memory_summary.md → MEMORY.md → rollout summaries / skills
+    ↓ 新会话按需下钻
+模型当前上下文
+```
+
+Phase 1 判断单个历史 thread 中有没有值得未来复用的信息，并同时保留 raw memory 与 rollout summary；Phase 2 在全局锁下把多个结果合并成面向未来的知识手册。SQLite 负责 job lease、重试和水位线，Markdown 负责可读知识，工作区内的 Git baseline 负责判断输入相对上次成功结果是否真的变化。
+
+读路径只把短小、可导航的 `memory_summary.md` 注入 developer instructions。模型认为相关时，再用受限的 list/search/read 工具查 `MEMORY.md`、rollout summary 或 skill。当前搜索本质更接近限定目录的文本匹配，而不是向量召回，因此 summary、关键词、路径和工具名的写法直接决定可发现性。
+
+这套设计的优点是输入规模、失败边界和并发语义都很清晰；代价是最终一致性：刚结束的会话不会保证立刻可用，两阶段都可能过滤信息，summary 路由也可能漏召回。它适合把记忆看成“经过整理的历史证据”，而不是必须同步提交的事务状态。
+
+### DeerFlow：为缓存稳定性冻结记忆，为纠正保留预算
+
+DeerFlow 选择了一条结构化、推送式的路线。它把记忆维护成 per-user/per-agent 的 `memory.json`，内容分为用户画像、时间层次的历史摘要和离散 facts。每轮回答后，对话进入 30 秒去抖队列；后台 LLM 读取旧档案和新对话，输出增量更新，再经过置信度阈值、去重、数量上限、半更新拒绝和原子写等护栏落盘。
+
+读取侧最有辨识度：记忆只在会话首轮注入一次，之后冻结。这样 prompt 前缀稳定，缓存命中率更高；代价是同一会话中刚形成的新记忆通常要到下一个会话才生效。这不是一致性缺陷，而是明确选择“跨会话新鲜度”而不是“轮级实时新鲜度”。
+
+DeerFlow 还把 `correction` 做成一等数据类型。从纠正信号检测、fact 分类、来源错误记录，到注入时的独立预算和受保护后缀，整条链路都在表达一个判断：**对 Agent 来说，避免重犯用户已经指出的错误，比多记住几条普通事实更有价值。**
+
+### Hermes：小型常驻记忆、历史档案与外部 provider 的窄腰
+
+Hermes 把长期信息拆成三种产品形态：
+
+- 少量、必须稳定影响行为的内容进入 `MEMORY.md` 和 `USER.md`；
+- 大量会话原文留在 SQLite，通过 `session_search` 按需查找；
+- 语义 recall 和复杂用户建模交给 Honcho、Mem0、Supermemory 等外部 provider。
+
+内置 memory 有严格字符上限，通过专门的 `memory` tool 原子增删改，而不是任由模型直接 patch。文件写入会立即发生，但当前 session 的 system prompt snapshot 不随之改变；新 memory 要到下一个 session 或 compression 后的 prompt rebuild 才进入系统提示词。这与 DeerFlow 的冻结相似，目标都是维护稳定的 prompt prefix。
+
+Hermes 的独特价值在治理面。`memory.write_approval` 可以把自动写入转成 inline 审批或 pending staged write；后台 review 负责学习，但会隔离外部 provider，避免把“请总结这段对话”的内部 review prompt 当成真实用户信息；`MemoryProvider` 抽象则用一组生命周期 hook 统一 prefetch、turn sync、session end 和 compression boundary。
+
+它证明了一个实用原则：内置核心不必吞下所有记忆能力。保持一个小而可靠的事实层，再用窄接口连接更强的 provider，往往比在 core 中硬编码每一种检索后端更可维护。
+
+### nanobot：两级巩固、纯注入和 Git 审计
+
+nanobot 的数据流非常清楚：Consolidator 把被上下文窗口驱逐的会话消息压成 `history.jsonl`，Dream 再把尚未处理的历史巩固进 `SOUL.md`、`USER.md`、`MEMORY.md` 或 skills。
+
+```text
+session messages
+    ↓ Consolidator
+history.jsonl
+    ↓ Dream
+durable Markdown / skills
+    ↓ prompt 注入
+下一轮模型上下文
+```
+
+它没有专用的 `memory_search` 或 embedding 后端。durable 文件常驻 prompt，尚未被 Dream 消化的 recent history 也在数量和 token 上限内直接注入。`.dream_cursor` 同时决定 Dream 处理进度和 recent history 的注入起点：一条历史一旦被巩固，就退出流水账上下文，避免同一事实重复占预算。
+
+nanobot 最值得借鉴的是“不要相信整理 agent 的自述”。Dream 只有在 durable 文件出现真实 Git diff 时才推进 cursor，提交信息也来自 diff；没有改动就重试同一批。再配合 `/dream-log` 和 `/dream-restore`，自动记忆第一次拥有了接近代码修改的审计与回滚体验。
+
+它的短板同样直接：随着知识规模增长，纯注入会受到固定上下文成本和噪声的限制。nanobot 用狠剪枝、cursor 和小型 durable 文件延缓这个问题，但没有从根本上获得大规模按需召回能力。
+
+### OpenClaw：文件是本体，索引只是可重建的加速层
+
+OpenClaw 是七种方案中检索栈最丰富的一套。`MEMORY.md` 保存长期精选摘要，`memory/YYYY-MM-DD*.md` 保存每日工作记录；普通 turn 可以通过 `memory_search` 找候选，再用 `memory_get` 读取原文。内置 SQLite 支持 FTS、embedding 和 hybrid search，可选 QMD 则提供独立 collection、query expansion 和 reranking。
+
+但它最关键的设计不是“用了向量数据库”，而是坚持 Markdown 才是 canonical source。SQLite chunk、FTS、embedding 和 QMD collection 都是派生结构，可以 full reindex；索引损坏不应改变事实，重建索引也不会生成新的长期记忆。
+
+写入侧同样分层：显式记忆可直接进入文件；接近 compaction 时，silent memory flush 先把易丢的当前上下文追加到 daily note；可选 dreaming/promote 再把多次出现、稳定且高质量的候选提升进 `MEMORY.md`。这把“抢救现场”和“晋升长期事实”拆成了两个不同动作。
+
+OpenClaw 的代价是运维面更大：文件 watcher、chunking、embedding provider、cache、SQLite/QMD 状态和 rerank 参数都可能影响召回。它更像一套本地 memory platform，而不只是一个记忆文件约定。
+
+### opencode：不要把完整的会话工程误叫成长期记忆
+
+opencode core 的优势在另一条轴上：持久化 session message、durable input、compaction checkpoint、System Context epoch 和 instruction files，让一个复杂会话可以恢复、压缩和继续运行。
+
+但在当前研究快照中，它没有默认的 `MEMORY.md` 事实源、daily notes、自动抽取、`memory_search`、embedding index 或 dreaming。用户可以用 `AGENTS.md`/configured instructions 维护稳定规则，也可以安装生态插件扩展跨会话记忆，但这些应与 core 能力分开报告。
+
+opencode 的案例提醒我们：**“保存了过去”不等于“能在未来独立任务中选择性复用过去”。** 前者是日志与会话连续性，后者才需要完整的 acquisition、maintenance 和 delivery 机制。
+
+## 从七种实现中看到的五个共同矛盾
+
+### 1. 新鲜度与 prompt cache 存在持续张力
+
+DeerFlow 和 Hermes 冻结会话内 memory snapshot，换取稳定前缀；OpenClaw 每 turn 刷新 bootstrap，更偏向及时看到文件编辑；Claude Code 的 selector 可以按 turn 重新选择 topic，但要付出额外 side query 成本。
+
+这不是哪个实现“更先进”，而是产品工作负载不同。聊天型 Agent 更看重缓存、稳定人格和低延迟；代码 Agent 的仓库状态变化快，更需要把旧记忆降级成线索，并实时验证当前文件。
+
+### 2. Push 省一次检索，Pull 省长期上下文
+
+DeerFlow、Hermes 内置 memory 和 nanobot 主要是 push：模型天然能看到，不依赖它主动调用检索工具，但每一轮都要承担固定 token 成本，规模大后噪声难以控制。
+
+Codex 和 OpenClaw 更偏 pull：先给短索引或工具入口，需要时再下钻，扩展性更好，但会出现“记忆存在，模型却没想起来查”的 delivery failure。Claude Code 和 OpenClaw 的主动 selector/Active Memory，实质是在 push 与 pull 之间加入一个受预算约束的自动路由层。
+
+比较成熟的方向不是二选一，而是三层组合：**极小的高权威摘要常驻、系统主动挑选少量相关候选、模型需要证据时再读取原文。**
+
+### 3. LLM 擅长归纳，却不适合担任唯一事务管理器
+
+七种方案普遍让 LLM 做摘要、聚类、纠错和晋升，因为这些任务难以纯规则化。但可靠系统不会只相信模型说“我已经保存”：
+
+- DeerFlow 在深拷贝上应用更新，并做原子替换和半更新拒绝；
+- Codex 用 SQLite lease 管理任务，用 Git diff 判断 Phase 2 输入变化；
+- nanobot 用真实 Git diff 决定 Dream cursor 是否推进；
+- Hermes 用文件锁、唯一子串匹配、批量原子提交和可选审批门；
+- Claude Code 用 cursor、受限工具和路径边界控制后台 fork。
+
+适合 LLM 的是语义判断，适合程序的则是并发、权限、提交、游标和回滚。记忆系统的可靠性，来自二者边界清楚，而不是把更多职责交给更大的模型。
+
+### 4. “记住”只是开始，“忘掉”才检验系统成熟度
+
+一个只会追加的系统迟早会被重复、过期和冲突淹没。真正困难的是：用户纠正后旧值是否退出 active delivery；删除后搜索索引是否同步消失；项目记忆是否泄漏给其他用户；临时进度是否被错误提升成长期规则。
+
+因此记忆单元至少需要四种元数据：**scope、provenance、freshness 和 status**。其中 status 不应只有 active，还应表达 pending、superseded、deleted 或需要验证。很多 hallucination 并不是模型凭空编造，而是系统向它交付了一条已经失效、却仍长得像当前事实的旧记忆。
+
+### 5. 最重要的指标不是存了多少，而是交付了什么
+
+长期记忆的端到端质量可以粗略写成：
+
+```text
+Memory Quality
+  = Acquisition × Maintenance × Delivery × Utilization
+```
+
+这是乘法而不是加法：事实没有写入，后面全为零；存储正确但 selector 没选中，模型仍然不知道；相关记忆已经交付但模型没有用到正确工具参数，任务同样失败。
+
+也因此，单看最终 QA 准确率或向量检索 Recall 都不够。更合理的评测应同时记录：该记的是否写入、不该记的是否过滤；旧值是否被替代；当前模型实际看到了哪些 push/tool 记忆；这些记忆最终是否改变回答或环境状态。
+
+## 如果从头设计一套 Harness Memory
+
+综合这七种路线，我会采用一套“快写、慢整理、分层读、硬治理”的架构。
+
+**第一，按权威性拆事实源。** 人工规则、用户明确确认的偏好、模型自动推断、当前 session 进度和原始 transcript 必须分层。自动记忆不能悄悄升级成与项目指令同等权威的规则。
+
+**第二，写入采用快慢双通道。** 用户明确说“记住/忘记”时同步写入或进入可见审批；普通对话中的隐式信号异步提取。后台再周期性合并、去重、处理 supersession，并且失败不能阻塞主任务。
+
+**第三，读取采用三级渐进披露。** 常驻内容只保留极小的高价值摘要；每个新任务由轻量路由器选择少量相关记忆；需要精确结论时再读取带 provenance 的原文。任何一层都要有 token、文件数和时间预算。
+
+**第四，把纠正、删除和作用域当成一等能力。** correction 应比普通观察更高优先级；删除必须贯穿事实源、索引和缓存；user/project/team/agent scope 应在存储路径和查询过滤两层同时落实。
+
+**第五，让程序掌管真实性边界。** 使用原子写、lease、cursor、内容 hash、真实 diff、路径限制、secret scan 和可回滚日志。LLM 决定“这意味着什么”，程序决定“是否真的提交、提交到了哪里、能否撤销”。
+
+**第六，内建可观测性。** 用户和评测系统应能回答：这条记忆来自哪个 session，何时写入，为什么被召回，占了多少 token，是否过期，哪个回答使用了它。没有这些证据，记忆错误只能被笼统归咎于模型。
+
+## 结语
+
+七种 harness 没有给出一个统一赢家，因为它们优化的目标不同：DeerFlow 和 Hermes 偏爱小型、稳定、缓存友好的用户记忆；nanobot 追求透明、简单、可审计的文件巩固；OpenClaw 构建了更完整的本地检索平台；Codex 把历史知识化做成后台编译流水线；Claude Code 则把权威性、作用域和生命周期拆到了最细；opencode 提醒我们，优秀的会话连续性本身也值得独立设计，但不应被误称为长期记忆。
+
+这些方案最终汇聚到同一个认识：Agent 记忆的核心不是“保存过去”，而是**在正确的时间，把正确范围内、仍然有效、可追溯的过去，交付给当前任务**。
+
+## 参考文献
+
+1. [pengchengneo/Claude-Code](https://github.com/pengchengneo/Claude-Code)（基于公开 npm 包 source map 还原的研究仓库，并非 Anthropic 官方维护的 pristine source tree）
+2. [openai/codex](https://github.com/openai/codex)
+3. [bytedance/deer-flow](https://github.com/bytedance/deer-flow)
+4. [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)
+5. [HKUDS/nanobot](https://github.com/HKUDS/nanobot)
+6. [openclaw/openclaw](https://github.com/openclaw/openclaw)
+7. [anomalyco/opencode](https://github.com/anomalyco/opencode)

@@ -1,0 +1,12 @@
+# Dependencies and build output
+node_modules/
+.next/
+out/
+
+# Local environment and editor files
+.env.local
+.DS_Store
+*.tsbuildinfo
+
+# Private drafts, research notes, and temporary assets
+temp/
