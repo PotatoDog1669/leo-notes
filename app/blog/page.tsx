@@ -1,11 +1,11 @@
-import { AllContent } from '@/components/all-content'
+import { BlogContent } from '@/components/blog-content'
 import { SiteShell } from '@/components/site-shell'
 import { getAllPosts } from '@/lib/posts'
 
-export default function HomePage() {
+export default function BlogPage() {
   return (
     <SiteShell>
-      <AllContent posts={getAllPosts()} />
+      <BlogContent posts={getAllPosts()} />
     </SiteShell>
   )
 }

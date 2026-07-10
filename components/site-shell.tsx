@@ -7,8 +7,8 @@ import { usePathname } from 'next/navigation'
 import { PixelIcon } from '@/components/pixel-icon'
 
 const navigation = [
-  { href: '/all', label: 'All', icon: 'map' },
-  { href: '/', label: 'Blog', icon: 'scroll' },
+  { href: '/', label: 'All', icon: 'map' },
+  { href: '/blog', label: 'Blog', icon: 'scroll' },
   { href: '/notes', label: 'Notes', icon: 'journal' },
   { href: '/projects', label: 'Projects', icon: 'anvil' },
   { href: '/about', label: 'About Me', icon: 'nameplate' },
@@ -111,7 +111,7 @@ export function SiteShell({ children }: { children: ReactNode }) {
 
         <nav className="primary-nav" aria-label="Primary navigation">
           {navigation.map((item) => {
-            const active = pathname === item.href
+            const active = item.href === '/' ? pathname === '/' : pathname === item.href || pathname.startsWith(`${item.href}/`)
             return (
               <Link key={item.href} href={item.href} className={active ? 'active' : ''} onClick={() => setMenuOpen(false)}>
                 <span aria-hidden="true"><PixelIcon name={item.icon as 'map' | 'journal' | 'scroll' | 'anvil' | 'nameplate'} size={24} /></span>
