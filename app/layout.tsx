@@ -19,7 +19,7 @@ export const metadata: Metadata = {
   },
   description: 'Writing by Leo (黎耀聪) on large language models, agents, and the systems around them.',
   icons: {
-    icon: [{ url: '/icon.svg?v=2', type: 'image/svg+xml' }],
+    icon: [{ url: '/icon.svg?v=3', type: 'image/svg+xml' }],
   },
   authors: [{ name: 'Leo (黎耀聪)', url: 'https://github.com/PotatoDog1669' }],
   creator: 'Leo (黎耀聪)',

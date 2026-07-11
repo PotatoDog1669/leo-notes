@@ -14,9 +14,10 @@ const c = {
 
 function Brand() {
   return <>
-    <rect x="2" y="8" width="20" height="14" fill={c.ink} /><rect x="3" y="7" width="18" height="3" fill={c.ink} />
-    <rect x="4" y="7" width="16" height="2" fill={c.grass} /><rect x="5" y="8" width="5" height="2" fill="#a2d261" /><rect x="15" y="8" width="4" height="2" fill={c.leaf} />
-    <rect x="4" y="10" width="16" height="10" fill={c.earth} /><rect x="5" y="11" width="4" height="3" fill={c.earthLight} /><rect x="11" y="10" width="3" height="3" fill="#70402f" /><rect x="16" y="14" width="3" height="4" fill={c.earthLight} /><rect x="7" y="17" width="4" height="3" fill="#6f4130" />
+    <rect width="24" height="24" fill={c.ink} />
+    <rect x="2" y="2" width="20" height="6" fill={c.grass} /><rect x="2" y="8" width="20" height="14" fill={c.earth} />
+    <rect x="4" y="2" width="6" height="3" fill="#a2d261" /><rect x="16" y="2" width="4" height="3" fill={c.leaf} />
+    <rect x="4" y="10" width="6" height="4" fill={c.earthLight} /><rect x="12" y="8" width="4" height="4" fill="#70402f" /><rect x="18" y="14" width="2" height="6" fill={c.earthLight} /><rect x="6" y="17" width="6" height="4" fill="#6f4130" />
   </>
 }
 
