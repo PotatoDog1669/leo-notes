@@ -1,4 +1,5 @@
 import Link from 'next/link'
+import type { Metadata } from 'next'
 import { notFound } from 'next/navigation'
 import { ArrowLeft, ArrowRight, Hash } from 'lucide-react'
 import { marked } from 'marked'
@@ -29,6 +30,35 @@ function renderPostContent(markdown: string) {
 
 export function generateStaticParams() {
   return getAllPosts().map((post) => ({ slug: post.slug }))
+}
+
+export async function generateMetadata({ params }: { params: Promise<{ slug: string }> }): Promise<Metadata> {
+  const { slug } = await params
+  const post = getPostBySlug(slug)
+  if (!post) return {}
+
+  const image = `/blog/${post.slug}/opengraph-image`
+  return {
+    title: post.title,
+    description: post.summary,
+    keywords: post.tags,
+    alternates: { canonical: `/blog/${post.slug}` },
+    openGraph: {
+      type: 'article',
+      title: post.title,
+      description: post.summary,
+      url: `/blog/${post.slug}`,
+      publishedTime: `${post.date}T00:00:00.000Z`,
+      tags: post.tags,
+      images: [{ url: image, width: 1200, height: 630, alt: post.title }],
+    },
+    twitter: {
+      card: 'summary_large_image',
+      title: post.title,
+      description: post.summary,
+      images: [image],
+    },
+  }
 }
 
 export default async function PostPage({ params }: { params: Promise<{ slug: string }> }) {
