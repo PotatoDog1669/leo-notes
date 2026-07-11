@@ -18,6 +18,9 @@ export const metadata: Metadata = {
     template: "%s | Leo's Notes",
   },
   description: 'Writing by Leo (黎耀聪) on large language models, agents, and the systems around them.',
+  icons: {
+    icon: [{ url: '/icon.svg?v=2', type: 'image/svg+xml' }],
+  },
   authors: [{ name: 'Leo (黎耀聪)', url: 'https://github.com/PotatoDog1669' }],
   creator: 'Leo (黎耀聪)',
   keywords: ['LLM', 'AI agents', 'algorithm engineering', 'systems design', 'Leo'],
